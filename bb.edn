@@ -1,0 +1,105 @@
+; https://book.babashka.org/
+; https://github.com/babashka/pods
+
+{:deps {honeysql/honeysql {:mvn/version "1.0.461"}}
+ :tasks {:requires ([babashka.fs :as fs]
+                    [clojure.java.io :as io]
+                    [babashka.pods :as pods]
+                    [honeysql.core :as sql])
+         :init (do
+                 ;; SQLite Babashka Pod
+                 (pods/load-pod 'org.babashka/go-sqlite3 "0.1.0")
+                 (require '[pod.babashka.go-sqlite3 :as sqlite])
+
+                 (def db "habits.sqlite")
+                 (def horizontal-separator "=======================")
+
+                 (def completed-indicator "\uD83D\uDFE2")
+                 (def uncompleted-indicator "\uD83D\uDD34")
+
+                 ;; Initialize database if it doesn't exist
+                 (when (not (.exists (io/file db)))
+                   (sqlite/query db "create table habits (id TEXT NOT NULL, date TEXT NOT NULL)")))
+
+         habits:list
+         {:doc "List habits"
+          :task (let [[habit] *command-line-args*
+                      today (java.time.LocalDate/now)
+                      report-dates (->> (iterator-seq
+                                          (.iterator
+                                            (.datesUntil
+                                              (.minusDays today 6)
+                                              (.plusDays today 1)))))]
+                  (doseq [[habit dates] (->> {:select [:*]
+                                              :from [:habits]}
+                                          (sql/format)
+                                          (sqlite/query db)
+                                          (distinct)
+                                          (group-by :id))]
+                    (println horizontal-separator)
+                    (println habit "(last 7 days):")
+                    (let [completed-dates (->> dates
+                                            (map :date)
+                                            (distinct)
+                                            (set))]
+                      (println
+                        (clojure.string/join " "
+                          (map (fn [date]
+                                 (if (contains? completed-dates (str date))
+                                   completed-indicator
+                                   uncompleted-indicator)) report-dates)))))
+                  (println horizontal-separator))}
+
+         habits:complete
+         {:doc "Complete habit"
+          :task (let [[habit date] *command-line-args*
+                      date (or date (str (java.time.LocalDate/now)))]
+                  (sqlite/execute! db
+                    ["INSERT INTO habits (id, date) VALUES (?, ?)"
+                     habit
+                     date])
+                  (println horizontal-separator)
+                  (println habit)
+                  (println date)
+                  (println "Habit completed!")
+                  (println horizontal-separator))}
+
+         habits:show
+         {:doc "Show habit progress"
+          :requires ([clojure.pprint :as pp])
+          :task (let [[habit] *command-line-args*
+                      completed-dates (->> {:select [:*]
+                                            :from [:habits]
+                                            :where [:= :id habit]}
+                                        (sql/format)
+                                        (sqlite/query db)
+                                        (map :date)
+                                        (distinct)
+                                        (set))
+                      today (java.time.LocalDate/now)
+                      start-date (.minusWeeks
+                                   (.with today
+                                     (java.time.temporal.TemporalAdjusters/previous
+                                       java.time.DayOfWeek/MONDAY)) 7)
+                      report-dates (iterator-seq
+                                     (.iterator
+                                       (.datesUntil start-date
+                                         (.plusDays today 1))))]
+                  (println horizontal-separator)
+                  (println habit "(previous 7 weeks):")
+                  (doseq [[day-of-week report-dates] (group-by
+                                                       (fn [date]
+                                                         (.name (.getDayOfWeek date)))
+                                                       report-dates)]
+                    (println
+                      (clojure.string/join " "
+                        (concat [(-> day-of-week
+                                   (subs 0 3)
+                                   (clojure.string/lower-case)) " "]
+                          (map
+                            (fn [date]
+                              (if (contains? completed-dates (str date))
+                                completed-indicator
+                                uncompleted-indicator))
+                            (sort report-dates))))))
+                  (println horizontal-separator))}}}
